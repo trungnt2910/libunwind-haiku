@@ -232,7 +232,7 @@ _LIBUNWIND_EXPORT uintptr_t _Unwind_GetIPInfo(struct _Unwind_Context *context,
   return _Unwind_GetIP(context);
 }
 
-#if defined(_LIBUNWIND_SUPPORT_DWARF_UNWIND)
+#if defined(_LIBUNWIND_SUPPORT_DWARF_UNWIND) && !defined(__HAIKU__)
 
 /// Called by programs with dynamic code generators that want
 /// to register a dynamically generated FDE.
