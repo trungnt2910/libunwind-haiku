@@ -41,10 +41,8 @@
 #endif
 
 #if defined(_LIBUNWIND_TARGET_HAIKU) && defined(_LIBUNWIND_TARGET_X86_64)
-#include <elf.h>
-#include <image.h>
-#include <signal.h>
 #include <OS.h>
+#include <signal.h>
 #define _LIBUNWIND_CHECK_HAIKU_SIGRETURN 1
 #endif
 
@@ -2924,115 +2922,53 @@ int UnwindCursor<A, R>::stepThroughSigReturn(Registers_s390x &) {
        // defined(_LIBUNWIND_TARGET_S390X)
 
 #if defined(_LIBUNWIND_CHECK_HAIKU_SIGRETURN)
-
-#if defined(B_HAIKU_32_BIT)
-typedef Elf32_Sym elf_sym;
-#define ELF_ST_TYPE ELF32_ST_TYPE
-#elif defined(B_HAIKU_64_BIT)
-typedef Elf64_Sym elf_sym;
-#define ELF_ST_TYPE ELF64_ST_TYPE
-#endif
-
-// Private syscall declared as a weak symbol to prevent ABI breaks.
-extern "C" status_t __attribute__((weak))
-_kern_read_kernel_image_symbols(image_id id, elf_sym* symbolTable, int32* _symbolCount,
-                                char* stringTable, size_t* _stringTableSize, addr_t* _imageDelta);
-
-static addr_t signalHandlerBegin = 0;
-static addr_t signalHandlerEnd = 0;
-
 template <typename A, typename R>
 bool UnwindCursor<A, R>::setInfoForSigReturn() {
-  if (signalHandlerBegin == 0) {
-    // If we do not have the addresses yet, find them now.
-
-    // Determine if the private function is there and usable.
-    if (_kern_read_kernel_image_symbols == nullptr) {
-      signalHandlerBegin = (addr_t)-1;
+  Dl_info dlinfo;
+  const auto isSignalHandler = [&](pint_t addr) {
+    if (!dladdr(reinterpret_cast<void *>(addr), &dlinfo))
       return false;
-    }
-
-    // Get the system commpage and enumerate its symbols.
-    image_id commpageImage = -1;
-    image_info info;
-    int32 cookie = 0;
-    while (get_next_image_info(B_SYSTEM_TEAM, &cookie, &info) == B_OK) {
-      if (strcmp(info.name, "commpage") == 0) {
-        commpageImage = info.id;
-        break;
-      }
-    }
-    if (commpageImage == -1) {
-      signalHandlerBegin = (addr_t)-1;
+    if (strcmp(dlinfo.dli_fname, "commpage"))
       return false;
-    }
-
-    // Separate loop to get the process commpage,
-    // which is in a different address from the system commpage.
-    addr_t commpageAddress = -1;
-    cookie = 0;
-    while (get_next_image_info(B_CURRENT_TEAM, &cookie, &info) == B_OK) {
-      if (strcmp(info.name, "commpage") == 0) {
-        commpageAddress = (addr_t)info.text;
-        break;
-      }
-    }
-
-    // The signal handler function address is defined in the system commpage symbols.
-
-    // First call to get the memory required.
-    int32 symbolCount = 0;
-    size_t stringTableSize = 0;
-    if (_kern_read_kernel_image_symbols(commpageImage, nullptr, &symbolCount,
-                                        nullptr, &stringTableSize, nullptr) < B_OK) {
-      signalHandlerBegin = (addr_t)-1;
+    if (dlinfo.dli_sname == NULL ||
+        strcmp(dlinfo.dli_sname, "commpage_signal_handler"))
       return false;
-    }
-
-    size_t memorySize = symbolCount * sizeof(elf_sym) + stringTableSize + 1;
-    void* buffer = malloc(memorySize);
-    if (buffer == nullptr) {
-      // No more memory. This is a temporary failure, we can try again later.
-      return false;
-    }
-    memset(buffer, 0, memorySize);
-
-    elf_sym* symbols = (elf_sym*)buffer;
-    char* stringTable = (char*)buffer + symbolCount * sizeof(elf_sym);
-    if (_kern_read_kernel_image_symbols(commpageImage, symbols, &symbolCount,
-                                        stringTable, &stringTableSize, nullptr) < B_OK) {
-      free(buffer);
-      signalHandlerBegin = (addr_t)-1;
-      return false;
-    }
-
-    for (int32 i = 0; i < symbolCount; ++i) {
-      char* name = stringTable + symbols[i].st_name;
-      if (strcmp(name, "commpage_signal_handler") == 0) {
-        signalHandlerBegin = commpageAddress + symbols[i].st_value;
-        signalHandlerEnd = signalHandlerBegin + symbols[i].st_size;
-        break;
-      }
-    }
-    free(buffer);
-
-    if (signalHandlerBegin == 0) {
-      signalHandlerBegin = (addr_t)-1;
-      return false;
-    }
-  } else if (signalHandlerBegin == (addr_t)-1) {
-    // We have found, and failed.
-    return false;
-  }
-  pint_t pc = static_cast<pint_t>(this->getReg(UNW_REG_IP));
-  if (pc >= (pint_t)signalHandlerBegin && pc < (pint_t)signalHandlerEnd) {
-    _info = {};
-    _info.start_ip = signalHandlerBegin;
-    _info.end_ip = signalHandlerEnd;
-    _isSigReturn = true;
     return true;
+  };
+
+  pint_t pc = static_cast<pint_t>(this->getReg(UNW_REG_IP));
+  if (!isSignalHandler(pc))
+    return false;
+
+  pint_t start = reinterpret_cast<pint_t>(dlinfo.dli_saddr);
+
+  static size_t signalHandlerSize = 0;
+  if (signalHandlerSize == 0) {
+    size_t boundLow = 0;
+    size_t boundHigh = static_cast<size_t>(-1);
+
+    area_info areaInfo;
+    if (get_area_info(area_for(dlinfo.dli_saddr), &areaInfo) == B_OK)
+      boundHigh = areaInfo.size;
+
+    while (boundLow < boundHigh) {
+      size_t boundMid = boundLow + ((boundHigh - boundLow) / 2);
+      pint_t test = start + boundMid;
+      if (test >= start && isSignalHandler(test))
+        boundLow = boundMid + 1;
+      else
+        boundHigh = boundMid;
+    }
+
+    signalHandlerSize = boundHigh;
   }
-  return false;
+
+  _info = {};
+  _info.start_ip = start;
+  _info.end_ip = start + signalHandlerSize;
+  _isSigReturn = true;
+
+  return true;
 }
 
 template <typename A, typename R>
@@ -3049,7 +2985,7 @@ int UnwindCursor<A, R>::stepThroughSigReturn() {
   // - frame->bp (8 bytes). Not written by the kernel,
   //   but the signal handler has a "push %rbp" instruction.
   pint_t bp = this->getReg(UNW_X86_64_RBP);
-  vregs* regs = (vregs*)(bp + 0x70);
+  vregs *regs = (vregs *)(bp + 0x70);
 
   _registers.setRegister(UNW_REG_IP, regs->rip);
   _registers.setRegister(UNW_REG_SP, regs->rsp);
