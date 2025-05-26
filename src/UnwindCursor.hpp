@@ -40,7 +40,8 @@
 #define _LIBUNWIND_CHECK_LINUX_SIGRETURN 1
 #endif
 
-#if defined(_LIBUNWIND_TARGET_HAIKU) && defined(_LIBUNWIND_TARGET_X86_64)
+#if defined(_LIBUNWIND_TARGET_HAIKU) &&                                        \
+    (defined(_LIBUNWIND_TARGET_X86_64) || defined(_LIBUNWIND_TARGET_I386))
 #include <OS.h>
 #include <signal.h>
 #define _LIBUNWIND_CHECK_HAIKU_SIGRETURN 1
@@ -3006,6 +3007,34 @@ int UnwindCursor<A, R>::stepThroughSigReturn() {
   _registers.setRegister(UNW_X86_64_R15, regs->r15);
   // TODO: XMM
 #endif // defined(_LIBUNWIND_TARGET_X86_64)
+
+#if defined(_LIBUNWIND_TARGET_I386)
+  // Layout of the stack before function call:
+  // - userSignalFrameData* (4 bytes)
+  // - frame->ip (4 bytes)
+  // - frame->bp (4 bytes). Not written by the kernel,
+  //   but the signal handler has a "push %ebp" instruction.
+  pint_t bp = this->getReg(UNW_X86_ESP);
+  pint_t data = *(pint_t *)(bp + 0x8);
+
+  // Layout of the signal frame data:
+  // - siginfo_t    (public struct, fairly stable)
+  // - ucontext_t   (public struct, fairly stable)
+  //    + mcontext_t -> This is what we want.
+  vregs *regs = (vregs *)
+    (data + sizeof(siginfo_t) + offsetof(ucontext_t, uc_mcontext));
+
+  _registers.setRegister(UNW_REG_IP, regs->eip);
+  _registers.setRegister(UNW_REG_SP, regs->esp);
+  _registers.setRegister(UNW_X86_EAX, regs->eax);
+  _registers.setRegister(UNW_X86_ECX, regs->ecx);
+  _registers.setRegister(UNW_X86_EDX, regs->edx);
+  _registers.setRegister(UNW_X86_EBP, regs->ebp);
+  _registers.setRegister(UNW_X86_EDI, regs->edi);
+  _registers.setRegister(UNW_X86_ESI, regs->esi);
+  _registers.setRegister(UNW_X86_EBX, regs->ebx);
+  // TODO: XMM
+#endif // defined(_LIBUNWIND_TARGET_I386)
 
   return UNW_STEP_SUCCESS;
 }
