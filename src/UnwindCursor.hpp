@@ -3020,7 +3020,7 @@ template <typename A, typename R> int UnwindCursor<A, R>::step(bool stage2) {
   // Use unwinding info to modify register set as if function returned.
   int result;
 #if defined(_LIBUNWIND_CHECK_LINUX_SIGRETURN) ||                               \
-    defined(_LIBUNWIND_TARGET_HAIKU)
+    defined(_LIBUNWIND_CHECK_HAIKU_SIGRETURN)
   if (_isSigReturn) {
     result = this->stepThroughSigReturn();
   } else
